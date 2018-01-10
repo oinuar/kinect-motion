@@ -1,0 +1,105 @@
+<!doctype html>
+<html>
+<head>
+    <title>KinectMotion complex client example</title>
+
+    <style>
+        html, body {
+            padding: 0;
+            margin: 0;
+        }
+    
+        #canvas {
+            width: 1500px;
+            height: 1500px;
+        }
+    
+        #bodyIndexCanvas {
+            display: none;
+        }
+    </style>
+</head>
+
+<body>
+
+<canvas id="canvas">
+    No canvas support, please update your browser.
+</canvas>
+
+<canvas id="bodyIndexCanvas"></canvas>
+
+<script>
+    var socket = new WebSocket("ws://localhost:8521", "KinectV2MotionV1");
+    
+    var canvas = document.getElementById("canvas");
+    var bodyIndexCanvas = document.getElementById("bodyIndexCanvas");
+
+    var ctx = canvas.getContext("2d");
+    var bodyIndexCtx = bodyIndexCanvas.getContext("2d");
+    var bodyIndexPixelData = null;
+    
+    ctx.fillStyle = 'green';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    socket.addEventListener("open", function() {
+        console.log("KinectV2MotionV1 connection is now established.");
+    });
+    
+    socket.addEventListener("message", function(event) {
+        var reader = new FileReader();
+        
+        reader.addEventListener("load", function(e) {
+            var json = JSON.parse(e.target.result);
+
+            // Create body index pixel data if not created yet.
+            if (!bodyIndexPixelData || bodyIndexCanvas.width !== json.bodyIndex.width || bodyIndexCanvas.height !== json.bodyIndex.height) {
+                bodyIndexCanvas.width = json.bodyIndex.width;
+                bodyIndexCanvas.height = json.bodyIndex.height;
+                
+                bodyIndexPixelData = bodyIndexCtx.getImageData(0, 0, bodyIndexCanvas.width, bodyIndexCanvas.height);
+                
+                console.log("Body index pixel data %dx%d created.", bodyIndexCanvas.width, bodyIndexCanvas.height);
+            }
+            
+            // Convert body index pixels to color pixels. Each body
+            // index pixel contains information which tracked body ID
+            // it represents.
+            for (var i = 0, j = 0; i < json.bodyIndex.pixels.length; ++i) {
+            
+                // Draw non-tracked pixels black.
+                if (json.bodyIndex.pixels[i] === 255) {
+                    bodyIndexPixelData.data[j++] = 0;
+                    bodyIndexPixelData.data[j++] = 0;
+                    bodyIndexPixelData.data[j++] = 0;
+                    bodyIndexPixelData.data[j++] = 255;
+                }
+                
+                // Draw pixels that contain tracked bodies white.
+                else {
+                    bodyIndexPixelData.data[j++] = 128;
+                    bodyIndexPixelData.data[j++] = 128;
+                    bodyIndexPixelData.data[j++] = 128;
+                    bodyIndexPixelData.data[j++] = 255;    
+                }
+            }
+            
+            // Update the canvas.
+            bodyIndexCtx.putImageData(bodyIndexPixelData, 0, 0);
+            
+            // Draw it to UI canvas.
+            ctx.drawImage(bodyIndexCanvas, 0, 0, canvas.width, canvas.height);
+            
+            /*json.bodies = json.bodies.filter(x => x.isTracked);
+
+            document.getElementById("bodies").innerHTML = 
+                json.bodies.length === 0
+                    ? "Step in front of Kinect"
+                    : JSON.stringify(json.bodies, null, 3);*/
+        });
+        
+        reader.readAsText(event.data, "utf8");
+    });
+</script>
+
+</body>
+</html>

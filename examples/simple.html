@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+<head>
+    <title>KinectMotion simple client example</title>
+    
+    <style>
+        #bodies {
+            font-size: 26px;
+        }
+    </style>
+    
+    <script>
+        var socket = new WebSocket("ws://localhost:8521", "KinectV2MotionV1");
+        
+        socket.addEventListener("open", function() {
+            console.log("KinectV2MotionV1 connection is now established.");
+        });
+        
+        socket.addEventListener("message", function(event) {
+            var reader = new FileReader();
+            
+            reader.addEventListener("load", function(e) {
+                var json = JSON.parse(e.target.result);
+                
+                json.bodies = json.bodies.filter(x => x.isTracked);
+
+                document.getElementById("bodies").innerHTML = 
+                    json.bodies.length === 0
+                        ? "Step in front of Kinect"
+                        : JSON.stringify(json.bodies, null, 3);
+            });
+            
+            reader.readAsText(event.data, "utf8");        
+        });
+    </script>
+</head>
+
+<body>
+
+<pre id="bodies">Not Kinect stream available</pre>
+
+</body>
+</html>
