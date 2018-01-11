@@ -10,7 +10,7 @@ namespace KinectMotion
 {
    class WebSocketServer : IDisposable
    {
-      public event EventHandler<ClientConnectionEventArgs> ClientConnected;
+      public event EventHandler<ClientConnectionChangedEventArgs> ClientConnectionChanged;
 
       private HttpListener Listener { get; set; }
 
@@ -57,7 +57,7 @@ namespace KinectMotion
 
                   // Ignore task result completely. This will allow some send requests
                   // to throw an exception if for example the socket has died.
-                  .ContinueWith(x => Task.FromResult<object>(null)));
+                  .ContinueWith(_ => Task.FromResult<object>(null)));
          }
 
          await Task.WhenAll(tasks);
@@ -65,8 +65,12 @@ namespace KinectMotion
 
       public bool KeepAlive()
       {
+         int oldConnections;
+         int newConnections;
+
          lock (WebSockets)
          {
+            oldConnections = WebSockets.Count;
 
             // Clean up all client connections.
             for (int i = WebSockets.Count - 1; i >= 0; --i)
@@ -76,7 +80,13 @@ namespace KinectMotion
                if (WebSockets[i].State == WebSocketState.Aborted || WebSockets[i].State == WebSocketState.Closed || WebSockets[i].State == WebSocketState.CloseReceived)
                   WebSockets.RemoveAt(i);
             }
+
+            newConnections = WebSockets.Count;
          }
+
+         // Emit client connection changed event if connection count has changed.
+         if (oldConnections != newConnections)
+            OnClientConnectionChanged(newConnections);
 
          // Tell if the server is still listening.
          return Listener.IsListening;
@@ -101,9 +111,9 @@ namespace KinectMotion
          Listener.Stop();
       }
 
-      private void OnClientConnected(int connections)
+      private void OnClientConnectionChanged(int connections)
       {
-         ClientConnected?.Invoke(this, new ClientConnectionEventArgs(connections));
+         ClientConnectionChanged?.Invoke(this, new ClientConnectionChangedEventArgs(connections));
       }
 
       private async static Task<WebSocket> HandleWebSocketContext(HttpListenerContext context)
@@ -141,7 +151,7 @@ namespace KinectMotion
                   connections = server.WebSockets.Count;
                }
 
-               server.OnClientConnected(connections);
+               server.OnClientConnectionChanged(connections);
             }
             else
                HandleHttpRequest(context.Request, context.Response);
@@ -168,11 +178,11 @@ namespace KinectMotion
       }
    }
 
-   class ClientConnectionEventArgs : EventArgs
+   class ClientConnectionChangedEventArgs : EventArgs
    {
       public int Connections { get; private set; }
 
-      public ClientConnectionEventArgs(int connections)
+      public ClientConnectionChangedEventArgs(int connections)
       {
          Connections = connections;
       }

@@ -1,9 +1,12 @@
-﻿using Microsoft.Kinect;
+﻿using KinectMotion.Models;
+using Microsoft.Kinect;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Converters;
 using Newtonsoft.Json.Serialization;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 using System.Threading;
 
@@ -25,7 +28,7 @@ namespace KinectMotion
 
       Body[] Bodies { get; set; }
 
-      BodyIndex BodyIndex { get; set; }
+      byte[] BodyIndexPixels { get; set; }
 
       Program()
       {
@@ -37,7 +40,12 @@ namespace KinectMotion
          {
             ContractResolver = new CamelCasePropertyNamesContractResolver(),
             Culture = CultureInfo.InvariantCulture,
-            Formatting = Formatting.None
+            Formatting = Formatting.None,
+            Converters =
+            {
+               // Serialize enums as string names.
+               new StringEnumConverter()
+            }
          };
 
          // Streaming server will listen 8521 port and use WebSockets.
@@ -45,13 +53,8 @@ namespace KinectMotion
 
          var bodyIndexFrameDescription = Sensor.BodyIndexFrameSource.FrameDescription;
 
-         // Body index object that contains dimensions alongside with pixel data.
-         BodyIndex = new BodyIndex
-         {
-            Width = bodyIndexFrameDescription.Width,
-            Height = bodyIndexFrameDescription.Height,
-            Pixels = new byte[bodyIndexFrameDescription.Width * bodyIndexFrameDescription.Height]
-         };
+         // Initialize body index pixel data.
+         BodyIndexPixels = new byte[bodyIndexFrameDescription.Width * bodyIndexFrameDescription.Height];
 
          // We are interested in these Kinect frames. Body Index Frame contains
          // a raw body data. Body Frame contains the same data but in more structual
@@ -59,23 +62,47 @@ namespace KinectMotion
          BodyIndexFrameReader.FrameArrived += BodyIndexFrameReader_FrameArrived;
          BodyFrameReader.FrameArrived += BodyFrameReader_FrameArrived;
 
-         Server.ClientConnected += Server_ClientConnected;
+         // Subscribe state changes of Kinect sensor and the streaming server.
+         Sensor.IsAvailableChanged += Sensor_IsAvailableChanged;
+         Server.ClientConnectionChanged += Server_ClientConnectionChanged;
 
          // Start server and Kinect sensor.
          Server.Start();
          Sensor.Open();
       }
 
-      private void Server_ClientConnected(object sender, ClientConnectionEventArgs e)
+      private void Server_ClientConnectionChanged(object sender, ClientConnectionChangedEventArgs e)
       {
-         Console.WriteLine("Client connected. Currently there are {0} connection(s).", e.Connections);
+         Console.WriteLine("There are {0} client connection(s).", e.Connections);
+      }
+
+      private void Sensor_IsAvailableChanged(object sender, IsAvailableChangedEventArgs e)
+      {
+         if (e.IsAvailable)
+            Console.WriteLine("Kinect sensor is now available.");
+         else
+            Console.WriteLine("Kinect sensor is not available.");
       }
 
       static void Main(string[] args)
       {
          using (var program = new Program())
          {
-            Console.WriteLine("Serving on {0} endpoint(s).", string.Join(", ", program.Server.Endpoints));
+            Console.WriteLine(@"
+ _  ___                 _   __  __       _   _             
+| |/ (_)               | | |  \/  |     | | (_)            
+| ' / _ _ __   ___  ___| |_| \  / | ___ | |_ _  ___  _ __  
+|  < | | '_ \ / _ \/ __| __| |\/| |/ _ \| __| |/ _ \| '_ \ 
+| . \| | | | |  __/ (__| |_| |  | | (_) | |_| | (_) | | | |
+|_|\_\_|_| |_|\___|\___|\__|_|  |_|\___/ \__|_|\___/|_| |_|
+
+Welcome to KinectMotion server! Valid WebSocket endpoints are:
+
+{0}
+
+The transportation protocol of WebSocket is {1}.
+
+Please see examples in examples directory to understand better how this works.", string.Join(", ", program.Server.Endpoints), WebSocketServer.Protocol);
 
             // Stream the data as long as the application is running.
             program.Stream();
@@ -100,6 +127,57 @@ namespace KinectMotion
          }
       }
 
+      void PackMotionData()
+      {
+         var depthFrame = Sensor.BodyIndexFrameSource.FrameDescription;
+         var bodyIndexFrame = Sensor.BodyIndexFrameSource.FrameDescription;
+         var cm = Sensor.CoordinateMapper;
+
+         // Create JSON payload of the data.
+         var payload = ToJson(new MotionModel
+         {
+            Bodies = Bodies.Select(x => new BodyModel
+            {
+               Lean = x.Lean,
+               IsRestricted = x.IsRestricted,
+               IsTracked = x.IsTracked,
+               TrackingId = x.TrackingId,
+               ClippedEdges = x.ClippedEdges,
+               Joints = x.Joints,
+               HandRightState = x.HandRightState,
+               HandLeftConfidence = x.HandLeftConfidence,
+               HandLeftState = x.HandLeftState,
+               JointOrientations = x.JointOrientations,
+               LeanTrackingState = x.LeanTrackingState,
+               HandRightConfidence = x.HandRightConfidence,
+
+               // Convert all joint camera space points to depth space
+               // points that can be projected to 2D screen.
+               JointDepthSpacePositions = x.Joints.ToDictionary(
+                  y => y.Key,
+                  y => cm.MapCameraPointToDepthSpace(new CameraSpacePoint
+                     {
+                        X = y.Value.Position.X,
+                        Y = y.Value.Position.Y,
+
+                        // Make sure that depth does not vanish.
+                        Z = Math.Max(y.Value.Position.Z, 0.1f)
+                     })
+               )
+            }),
+            BodyIndexPixels = BodyIndexPixels,
+            DepthFrame = depthFrame,
+            BodyIndexFrame = bodyIndexFrame
+         });
+
+         // Put data to send queue.
+         lock (Queue)
+         {
+            Queue.Enqueue(payload);
+            Monitor.Pulse(Queue);
+         }
+      }
+
       void BodyFrameReader_FrameArrived(object sender, BodyFrameArrivedEventArgs e)
       {
          using (var frame = e.FrameReference.AcquireFrame())
@@ -115,15 +193,7 @@ namespace KinectMotion
             frame.GetAndRefreshBodyData(Bodies);
          }
 
-         // Create JSON payload of the data.
-         var payload = ToJson(new Payload(Bodies, BodyIndex));
-
-         // Put data to send queue as soon as it arrives.
-         lock (Queue)
-         {
-            Queue.Enqueue(payload);
-            Monitor.Pulse(Queue);
-         }
+         PackMotionData();
       }
 
       void BodyIndexFrameReader_FrameArrived(object sender, BodyIndexFrameArrivedEventArgs e)
@@ -136,7 +206,7 @@ namespace KinectMotion
             // Copy body index pixels to our memory. This itself won't update
             // connected clients; instead we wait for parsed and analyzed
             // body data to arrive from Kinect and update only then.
-            frame.CopyFrameDataToArray(BodyIndex.Pixels);
+            frame.CopyFrameDataToArray(BodyIndexPixels);
          }
       }
 
@@ -165,59 +235,4 @@ namespace KinectMotion
          Sensor = null;
       }
    }
-
-   struct Payload
-   {
-      public Body[] Bodies { get; set; }
-
-      public BodyIndex BodyIndex { get; set; }
-
-      public Payload(Body[] bodies, BodyIndex bodyIndex)
-      {
-         Bodies = bodies;
-         BodyIndex = bodyIndex;
-      }
-   }
-
-   struct BodyIndex
-   {
-      public int Width { get; set; }
-
-      public int Height { get; set; }
-
-      [JsonConverter(typeof(ByteArrayConverter))]
-      public byte[] Pixels { get; set; }
-   }
-
-   class ByteArrayConverter : JsonConverter
-   {
-      public override bool CanConvert(Type objectType)
-      {
-         return objectType == typeof(byte[]);
-      }
-
-      public override void WriteJson(JsonWriter writer, object value, JsonSerializer serializer)
-      {
-         if (value == null)
-         {
-            writer.WriteNull();
-            return;
-         }
-
-         writer.WriteStartArray();
-
-         var bytes = (byte[])value;
-
-         foreach (var @byte in bytes)
-            writer.WriteValue(@byte);
-
-         writer.WriteEndArray();
-      }
-
-      public override object ReadJson(JsonReader reader, Type objectType, object existingValue, JsonSerializer serializer)
-      {
-         throw new NotImplementedException();
-      }
-   }
-
 }

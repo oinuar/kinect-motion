@@ -14,6 +14,10 @@
             height: 1500px;
         }
     
+        #depthCanvas {
+            display: none;
+        }
+        
         #bodyIndexCanvas {
             display: none;
         }
@@ -26,20 +30,67 @@
     No canvas support, please update your browser.
 </canvas>
 
+<canvas id="depthCanvas"></canvas>
 <canvas id="bodyIndexCanvas"></canvas>
 
 <script>
     var socket = new WebSocket("ws://localhost:8521", "KinectV2MotionV1");
     
     var canvas = document.getElementById("canvas");
+    var depthCanvas = document.getElementById("depthCanvas");
     var bodyIndexCanvas = document.getElementById("bodyIndexCanvas");
 
     var ctx = canvas.getContext("2d");
+    var depthCtx = depthCanvas.getContext("2d");
     var bodyIndexCtx = bodyIndexCanvas.getContext("2d");
-    var bodyIndexPixelData = null;
     
-    ctx.fillStyle = 'green';
+    var bodyIndexPixelData = null;
+
+    var maxBodyCount = 0;
+    
+    // Create skeleton that tells which joint is attached to which joint.
+    var skeleton = [
+        // Torso
+        ["head", "neck"],
+        ["neck", "spineShoulder"],
+        ["spineShoulder", "spineMid"],
+        ["spineMid", "spineBase"],
+        ["spineShoulder", "shoulderRight"],
+        ["spineShoulder", "shoulderLeft"],
+        ["spineBase", "hipRight"],
+        ["spineBase", "hipLeft"],
+
+        // Right Arm
+        ["shoulderRight", "elbowRight"],
+        ["elbowRight", "wristRight"],
+        ["wristRight", "handRight"],
+        ["handRight", "handTipRight"],
+        ["wristRight", "thumbRight"],
+
+        // Left Arm
+        ["shoulderLeft", "elbowLeft"],
+        ["elbowLeft", "wristLeft"],
+        ["wristLeft", "handLeft"],
+        ["handLeft", "handTipLeft"],
+        ["wristLeft", "thumbLeft"],
+
+        // Right Leg
+        ["hipRight", "kneeRight"],
+        ["kneeRight", "ankleRight"],
+        ["ankleRight", "footRight"],
+
+        // Left Leg
+        ["hipLeft", "kneeLeft"],
+        ["kneeLeft", "ankleLeft"],
+        ["ankleLeft", "footLeft"]
+    ];
+    
+    ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    depthCtx.strokeStyle = "#fff";
+    depthCtx.fillStyle = "#fff";
+    depthCtx.lineWidth = 3;
     
     socket.addEventListener("open", function() {
         console.log("KinectV2MotionV1 connection is now established.");
@@ -51,54 +102,108 @@
         reader.addEventListener("load", function(e) {
             var json = JSON.parse(e.target.result);
 
+            // Resize depth canvas.
+            if (depthCanvas.width !== json.depthFrame.width || depthCanvas.height !== json.depthFrame.height) {
+                depthCanvas.width = json.depthFrame.width;
+                depthCanvas.height = json.depthFrame.height;
+            }
+            
             // Create body index pixel data if not created yet.
-            if (!bodyIndexPixelData || bodyIndexCanvas.width !== json.bodyIndex.width || bodyIndexCanvas.height !== json.bodyIndex.height) {
-                bodyIndexCanvas.width = json.bodyIndex.width;
-                bodyIndexCanvas.height = json.bodyIndex.height;
+            if (!bodyIndexPixelData || bodyIndexCanvas.width !== json.bodyIndexFrame.width || bodyIndexCanvas.height !== json.bodyIndexFrame.height) {
+                bodyIndexCanvas.width = json.bodyIndexFrame.width;
+                bodyIndexCanvas.height = json.bodyIndexFrame.height;
                 
                 bodyIndexPixelData = bodyIndexCtx.getImageData(0, 0, bodyIndexCanvas.width, bodyIndexCanvas.height);
                 
                 console.log("Body index pixel data %dx%d created.", bodyIndexCanvas.width, bodyIndexCanvas.height);
             }
             
+            // Update max body count invariant.
+            maxBodyCount = Math.max(json.bodies.length, maxBodyCount);
+            
             // Convert body index pixels to color pixels. Each body
             // index pixel contains information which tracked body ID
             // it represents.
-            for (var i = 0, j = 0; i < json.bodyIndex.pixels.length; ++i) {
-            
-                // Draw non-tracked pixels black.
-                if (json.bodyIndex.pixels[i] === 255) {
-                    bodyIndexPixelData.data[j++] = 0;
-                    bodyIndexPixelData.data[j++] = 0;
-                    bodyIndexPixelData.data[j++] = 0;
-                    bodyIndexPixelData.data[j++] = 255;
-                }
+            for (let i = 0, j = 0; i < json.bodyIndexPixels.length; ++i) {
+                const color = json.bodyIndexPixels[i] === 255
                 
-                // Draw pixels that contain tracked bodies white.
-                else {
-                    bodyIndexPixelData.data[j++] = 128;
-                    bodyIndexPixelData.data[j++] = 128;
-                    bodyIndexPixelData.data[j++] = 128;
-                    bodyIndexPixelData.data[j++] = 255;    
+                    // Draw non-tracked pixels in grey.
+                    ? { r: 220, g: 220, b: 220 }
+                    
+                    // Draw pixels that contain tracked bodies with a 
+                    // distinguishable color.
+                    : rainbow(maxBodyCount, json.bodyIndexPixels[i]);
+                
+                bodyIndexPixelData.data[j++] = color.r;
+                bodyIndexPixelData.data[j++] = color.g;
+                bodyIndexPixelData.data[j++] = color.b;
+                bodyIndexPixelData.data[j++] = 255;
+            }
+            
+            // Update pixels to body index canvas.
+            bodyIndexCtx.putImageData(bodyIndexPixelData, 0, 0);
+            
+            // Clear depth canvas.
+            depthCtx.clearRect(0, 0, depthCanvas.width, depthCanvas.height);
+            
+            // Draw skeleton of tracked bodies to depth canvas.
+            for (let i = 0; i < json.bodies.length; ++i) {
+            
+                // Skip non-tracked bodies.
+                if (!json.bodies[i].isTracked)
+                    continue;
+            
+                for (let j = 0; j < skeleton.length; ++j) {
+                    const start = json.bodies[i].jointDepthSpacePositions[skeleton[j][0]];
+                    const end = json.bodies[i].jointDepthSpacePositions[skeleton[j][1]];
+
+                    depthCtx.beginPath();
+                    depthCtx.moveTo(start.x, start.y);
+                    depthCtx.lineTo(end.x, end.y);
+                    depthCtx.stroke();
+                }
+            
+                // Draw each joint on top of sekeleton.
+                for (const joint in json.bodies[i].joints) {
+                    const p = json.bodies[i].jointDepthSpacePositions[joint];
+                    
+                    depthCtx.beginPath();
+                    depthCtx.arc(p.x, p.y, 5, 0, 2 * Math.PI, false);
+                    depthCtx.fill();
                 }
             }
             
-            // Update the canvas.
-            bodyIndexCtx.putImageData(bodyIndexPixelData, 0, 0);
-            
-            // Draw it to UI canvas.
+            // Draw body indices to UI canvas.
             ctx.drawImage(bodyIndexCanvas, 0, 0, canvas.width, canvas.height);
             
-            /*json.bodies = json.bodies.filter(x => x.isTracked);
-
-            document.getElementById("bodies").innerHTML = 
-                json.bodies.length === 0
-                    ? "Step in front of Kinect"
-                    : JSON.stringify(json.bodies, null, 3);*/
+            // Draw skeleton on top of body indices.
+            ctx.drawImage(depthCanvas, 0, 0, canvas.width, canvas.height);
         });
         
         reader.readAsText(event.data, "utf8");
     });
+    
+    function rainbow(numOfSteps, step) {
+        // This function generates vibrant, "evenly spaced" colours (i.e. no clustering). This is ideal for creating easily distinguishable vibrant markers in Google Maps and other apps.
+        // Adam Cole, 2011-Sept-14
+        // HSV to RBG adapted from: http://mjijackson.com/2008/02/rgb-to-hsl-and-rgb-to-hsv-color-model-conversion-algorithms-in-javascript
+        var r, g, b;
+        var h = step / numOfSteps;
+        var i = ~~(h * 6);
+        var f = h * 6 - i;
+        var q = 1 - f;
+        
+        switch (i % 6) {
+            case 0: r = 1; g = f; b = 0; break;
+            case 1: r = q; g = 1; b = 0; break;
+            case 2: r = 0; g = 1; b = f; break;
+            case 3: r = 0; g = q; b = 1; break;
+            case 4: r = f; g = 0; b = 1; break;
+            case 5: r = 1; g = 0; b = q; break;
+        }
+        
+        return { r: r, g: g, b: b };
+    }
 </script>
 
 </body>
