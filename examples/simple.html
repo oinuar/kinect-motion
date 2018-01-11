@@ -10,10 +10,10 @@
     </style>
     
     <script>
-        var socket = new WebSocket("ws://localhost:8521", "KinectV2MotionV1");
+        var socket = new WebSocket("ws://localhost:8521", "KinectMotionV1");
         
         socket.addEventListener("open", function() {
-            console.log("KinectV2MotionV1 connection is now established.");
+            console.log("KinectMotionV1 connection is now established.");
         });
         
         socket.addEventListener("message", function(event) {
@@ -21,13 +21,17 @@
             
             reader.addEventListener("load", function(e) {
                 var json = JSON.parse(e.target.result);
+
+                // We are only interested in body data.
+                if (json.type !== "BodyFrameData")
+                    return;
                 
-                json.bodies = json.bodies.filter(x => x.isTracked);
+                json.content.bodies = json.content.bodies.filter(x => x.isTracked);
 
                 document.getElementById("bodies").innerHTML = 
-                    json.bodies.length === 0
+                    json.content.bodies.length === 0
                         ? "Step in front of Kinect"
-                        : JSON.stringify(json.bodies, null, 3);
+                        : JSON.stringify(json.content.bodies, null, 3);
             });
             
             reader.readAsText(event.data, "utf8");        

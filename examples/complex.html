@@ -10,11 +10,11 @@
         }
     
         #canvas {
-            width: 1500px;
-            height: 1500px;
+            width: 100%;
+            height: 100%;
         }
     
-        #depthCanvas {
+        #bodyCanvas {
             display: none;
         }
         
@@ -30,18 +30,18 @@
     No canvas support, please update your browser.
 </canvas>
 
-<canvas id="depthCanvas"></canvas>
+<canvas id="bodyCanvas"></canvas>
 <canvas id="bodyIndexCanvas"></canvas>
 
 <script>
-    var socket = new WebSocket("ws://localhost:8521", "KinectV2MotionV1");
+    var socket = new WebSocket("ws://localhost:8521", "KinectMotionV1");
     
     var canvas = document.getElementById("canvas");
-    var depthCanvas = document.getElementById("depthCanvas");
+    var bodyCanvas = document.getElementById("bodyCanvas");
     var bodyIndexCanvas = document.getElementById("bodyIndexCanvas");
 
     var ctx = canvas.getContext("2d");
-    var depthCtx = depthCanvas.getContext("2d");
+    var bodyCtx = bodyCanvas.getContext("2d");
     var bodyIndexCtx = bodyIndexCanvas.getContext("2d");
     
     var bodyIndexPixelData = null;
@@ -88,100 +88,123 @@
     ctx.fillStyle = "#000";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    depthCtx.strokeStyle = "#fff";
-    depthCtx.fillStyle = "#fff";
-    depthCtx.lineWidth = 3;
-    
     socket.addEventListener("open", function() {
-        console.log("KinectV2MotionV1 connection is now established.");
+        console.log("KinectMotionV1 connection is now established.");
     });
     
     socket.addEventListener("message", function(event) {
-        var reader = new FileReader();
+        const reader = new FileReader();
         
         reader.addEventListener("load", function(e) {
-            var json = JSON.parse(e.target.result);
+            const json = JSON.parse(e.target.result);
 
-            // Resize depth canvas.
-            if (depthCanvas.width !== json.depthFrame.width || depthCanvas.height !== json.depthFrame.height) {
-                depthCanvas.width = json.depthFrame.width;
-                depthCanvas.height = json.depthFrame.height;
-            }
-            
-            // Create body index pixel data if not created yet.
-            if (!bodyIndexPixelData || bodyIndexCanvas.width !== json.bodyIndexFrame.width || bodyIndexCanvas.height !== json.bodyIndexFrame.height) {
-                bodyIndexCanvas.width = json.bodyIndexFrame.width;
-                bodyIndexCanvas.height = json.bodyIndexFrame.height;
+            switch (json.type) {
+            case "BodyFrameData":
+                processBodyFrameData(json.content);
+                break;
                 
-                bodyIndexPixelData = bodyIndexCtx.getImageData(0, 0, bodyIndexCanvas.width, bodyIndexCanvas.height);
-                
-                console.log("Body index pixel data %dx%d created.", bodyIndexCanvas.width, bodyIndexCanvas.height);
-            }
-            
-            // Update max body count invariant.
-            maxBodyCount = Math.max(json.bodies.length, maxBodyCount);
-            
-            // Convert body index pixels to color pixels. Each body
-            // index pixel contains information which tracked body ID
-            // it represents.
-            for (let i = 0, j = 0; i < json.bodyIndexPixels.length; ++i) {
-                const color = json.bodyIndexPixels[i] === 255
-                
-                    // Draw non-tracked pixels in grey.
-                    ? { r: 220, g: 220, b: 220 }
-                    
-                    // Draw pixels that contain tracked bodies with a 
-                    // distinguishable color.
-                    : rainbow(maxBodyCount, json.bodyIndexPixels[i]);
-                
-                bodyIndexPixelData.data[j++] = color.r;
-                bodyIndexPixelData.data[j++] = color.g;
-                bodyIndexPixelData.data[j++] = color.b;
-                bodyIndexPixelData.data[j++] = 255;
-            }
-            
-            // Update pixels to body index canvas.
-            bodyIndexCtx.putImageData(bodyIndexPixelData, 0, 0);
-            
-            // Clear depth canvas.
-            depthCtx.clearRect(0, 0, depthCanvas.width, depthCanvas.height);
-            
-            // Draw skeleton of tracked bodies to depth canvas.
-            for (let i = 0; i < json.bodies.length; ++i) {
-            
-                // Skip non-tracked bodies.
-                if (!json.bodies[i].isTracked)
-                    continue;
-            
-                for (let j = 0; j < skeleton.length; ++j) {
-                    const start = json.bodies[i].jointDepthSpacePositions[skeleton[j][0]];
-                    const end = json.bodies[i].jointDepthSpacePositions[skeleton[j][1]];
-
-                    depthCtx.beginPath();
-                    depthCtx.moveTo(start.x, start.y);
-                    depthCtx.lineTo(end.x, end.y);
-                    depthCtx.stroke();
-                }
-            
-                // Draw each joint on top of sekeleton.
-                for (const joint in json.bodies[i].joints) {
-                    const p = json.bodies[i].jointDepthSpacePositions[joint];
-                    
-                    depthCtx.beginPath();
-                    depthCtx.arc(p.x, p.y, 5, 0, 2 * Math.PI, false);
-                    depthCtx.fill();
-                }
-            }
-            
-            // Draw body indices to UI canvas.
-            ctx.drawImage(bodyIndexCanvas, 0, 0, canvas.width, canvas.height);
-            
-            // Draw skeleton on top of body indices.
-            ctx.drawImage(depthCanvas, 0, 0, canvas.width, canvas.height);
+            case "BodyIndexFrameData":
+                processBodyIndexFrameData(json.content);
+                break;
+            } 
         });
         
         reader.readAsText(event.data, "utf8");
     });
+    
+    function redraw() {
+    
+        // Draw body indices to UI canvas.
+        ctx.drawImage(bodyIndexCanvas, 0, 0, canvas.width, canvas.height);
+        
+        // Draw skeleton on top of body indices.
+        ctx.drawImage(bodyCanvas, 0, 0, canvas.width, canvas.height);
+    }
+
+    function processBodyFrameData(data) {
+    
+        // Resize body canvas.
+        if (bodyCanvas.width !== data.screenDescription.width || bodyCanvas.height !== data.screenDescription.height) {
+            bodyCanvas.width = data.screenDescription.width;
+            bodyCanvas.height = data.screenDescription.height;
+        }
+        
+        // Update max body count invariant.
+        maxBodyCount = Math.max(data.bodies.length, maxBodyCount);
+
+        bodyCtx.strokeStyle = "#fff";
+        bodyCtx.fillStyle = "#fff";
+        bodyCtx.lineWidth = 3;
+
+        // Clear depth canvas.
+        bodyCtx.clearRect(0, 0, bodyCanvas.width, bodyCanvas.height);
+        
+        // Draw every body to body canvas.
+        for (let i = 0; i < data.bodies.length; ++i) {
+        
+            // Skip non-tracked bodies.
+            if (!data.bodies[i].isTracked)
+                continue;
+        
+            // Draw lines to represent the skeleton of tracked bodies.
+            for (let j = 0; j < skeleton.length; ++j) {
+                const start = data.bodies[i].jointScreenPositions[skeleton[j][0]];
+                const end = data.bodies[i].jointScreenPositions[skeleton[j][1]];
+
+                bodyCtx.beginPath();
+                bodyCtx.moveTo(start.x, start.y);
+                bodyCtx.lineTo(end.x, end.y);
+                bodyCtx.stroke();
+            }
+        
+            // Draw circle to represent each joint on top of sekeleton.
+            for (const joint in data.bodies[i].joints) {
+                const p = data.bodies[i].jointScreenPositions[joint];
+                
+                bodyCtx.beginPath();
+                bodyCtx.arc(p.x, p.y, 5, 0, 2 * Math.PI, false);
+                bodyCtx.fill();
+            }
+        }
+
+        // Update the UI.
+        redraw();
+    }
+    
+    function processBodyIndexFrameData(data) {
+
+        // Create body index pixel data if not created yet.
+        if (!bodyIndexPixelData || bodyIndexCanvas.width !== data.description.width || bodyIndexCanvas.height !== data.description.height) {
+            bodyIndexCanvas.width = data.description.width;
+            bodyIndexCanvas.height = data.description.height;
+            
+            bodyIndexPixelData = bodyIndexCtx.getImageData(0, 0, bodyIndexCanvas.width, bodyIndexCanvas.height);
+            
+            console.log("Body index pixel data %dx%d created.", bodyIndexCanvas.width, bodyIndexCanvas.height);
+        }
+    
+        // Convert body index pixels to color pixels. Each body
+        // index pixel contains information which tracked body ID
+        // it represents.
+        for (let i = 0, j = 0; i < data.pixels.length; ++i) {
+            const color = data.pixels[i] === 255
+            
+                // Draw non-tracked pixels in grey.
+                ? { r: 220, g: 220, b: 220 }
+                
+                // Draw pixels that contain tracked bodies with a 
+                // distinguishable color.
+                : rainbow(maxBodyCount, data.pixels[i]);
+            
+            bodyIndexPixelData.data[j++] = color.r;
+            bodyIndexPixelData.data[j++] = color.g;
+            bodyIndexPixelData.data[j++] = color.b;
+            bodyIndexPixelData.data[j++] = 255;
+        }
+    
+        // Update pixels to body index canvas.
+        bodyIndexCtx.putImageData(bodyIndexPixelData, 0, 0);
+    }
     
     function rainbow(numOfSteps, step) {
         // This function generates vibrant, "evenly spaced" colours (i.e. no clustering). This is ideal for creating easily distinguishable vibrant markers in Google Maps and other apps.

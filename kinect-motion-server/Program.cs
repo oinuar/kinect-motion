@@ -1,4 +1,5 @@
-﻿using KinectMotion.Models;
+﻿using KinectMotion.Frames;
+using KinectMotion.Models;
 using Microsoft.Kinect;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
@@ -71,19 +72,6 @@ namespace KinectMotion
          Sensor.Open();
       }
 
-      private void Server_ClientConnectionChanged(object sender, ClientConnectionChangedEventArgs e)
-      {
-         Console.WriteLine("There are {0} client connection(s).", e.Connections);
-      }
-
-      private void Sensor_IsAvailableChanged(object sender, IsAvailableChangedEventArgs e)
-      {
-         if (e.IsAvailable)
-            Console.WriteLine("Kinect sensor is now available.");
-         else
-            Console.WriteLine("Kinect sensor is not available.");
-      }
-
       static void Main(string[] args)
       {
          using (var program = new Program())
@@ -102,7 +90,7 @@ Welcome to KinectMotion server! Valid WebSocket endpoints are:
 
 The transportation protocol of WebSocket is {1}.
 
-Please see examples in examples directory to understand better how this works.", string.Join(", ", program.Server.Endpoints), WebSocketServer.Protocol);
+Please see examples in examples directory to understand better how this works.", string.Join(Environment.NewLine, program.Server.Endpoints), WebSocketServer.Protocol);
 
             // Stream the data as long as the application is running.
             program.Stream();
@@ -122,60 +110,93 @@ Please see examples in examples directory to understand better how this works.",
                while (Queue.Count > 0)
                   Server.Send(Queue.Dequeue()).Wait();
 
+               // Wait for queue changes.
                Monitor.Wait(Queue);
             }
          }
       }
 
-      void PackMotionData()
+      void OnBodyData()
       {
-         var depthFrame = Sensor.BodyIndexFrameSource.FrameDescription;
-         var bodyIndexFrame = Sensor.BodyIndexFrameSource.FrameDescription;
+         var description = Sensor.DepthFrameSource.FrameDescription;
          var cm = Sensor.CoordinateMapper;
 
-         // Create JSON payload of the data.
-         var payload = ToJson(new MotionModel
+         OnMessage(new Message<BodyFrameData>
          {
-            Bodies = Bodies.Select(x => new BodyModel
+            Content = new BodyFrameData
             {
-               Lean = x.Lean,
-               IsRestricted = x.IsRestricted,
-               IsTracked = x.IsTracked,
-               TrackingId = x.TrackingId,
-               ClippedEdges = x.ClippedEdges,
-               Joints = x.Joints,
-               HandRightState = x.HandRightState,
-               HandLeftConfidence = x.HandLeftConfidence,
-               HandLeftState = x.HandLeftState,
-               JointOrientations = x.JointOrientations,
-               LeanTrackingState = x.LeanTrackingState,
-               HandRightConfidence = x.HandRightConfidence,
+               ScreenDescription = description,
+               Bodies = Bodies.Select(x => new BodyModel
+                  {
+                     Lean = x.Lean,
+                     IsRestricted = x.IsRestricted,
+                     IsTracked = x.IsTracked,
+                     TrackingId = x.TrackingId,
+                     ClippedEdges = x.ClippedEdges,
+                     Joints = x.Joints,
+                     HandRightState = x.HandRightState,
+                     HandLeftConfidence = x.HandLeftConfidence,
+                     HandLeftState = x.HandLeftState,
+                     JointOrientations = x.JointOrientations,
+                     LeanTrackingState = x.LeanTrackingState,
+                     HandRightConfidence = x.HandRightConfidence,
 
-               // Convert all joint camera space points to depth space
-               // points that can be projected to 2D screen.
-               JointDepthSpacePositions = x.Joints.ToDictionary(
-                  y => y.Key,
-                  y => cm.MapCameraPointToDepthSpace(new CameraSpacePoint
-                     {
-                        X = y.Value.Position.X,
-                        Y = y.Value.Position.Y,
+                     // Convert all joint camera space points to depth space
+                     // points that can be projected to 2D screen.
+                     JointScreenPositions = x.Joints.ToDictionary(
+                        y => y.Key,
+                        y => cm.MapCameraPointToDepthSpace(new CameraSpacePoint
+                           {
+                              X = y.Value.Position.X,
+                              Y = y.Value.Position.Y,
 
-                        // Make sure that depth does not vanish.
-                        Z = Math.Max(y.Value.Position.Z, 0.1f)
-                     })
-               )
-            }),
-            BodyIndexPixels = BodyIndexPixels,
-            DepthFrame = depthFrame,
-            BodyIndexFrame = bodyIndexFrame
+                              // Make sure that depth does not vanish.
+                              Z = Math.Max(y.Value.Position.Z, 0.1f)
+                           })
+                     )
+               })
+            }
          });
+      }
 
-         // Put data to send queue.
+      void OnBodyIndexData()
+      {
+         var description = Sensor.BodyIndexFrameSource.FrameDescription;
+         var cm = Sensor.CoordinateMapper;
+
+         OnMessage(new Message<BodyIndexFrameData>
+         {
+            Content = new BodyIndexFrameData
+            {
+               Description = description,
+               Pixels = BodyIndexPixels
+            }
+         });
+      }
+
+      void OnMessage<T>(Message<T> message)
+      {
+         var payload = ToBytes(message);
+
+         // Put message to send queue and inform streaming thread that queue has changed.
          lock (Queue)
          {
             Queue.Enqueue(payload);
             Monitor.Pulse(Queue);
          }
+      }
+
+      void Server_ClientConnectionChanged(object sender, ClientConnectionChangedEventArgs e)
+      {
+         Console.WriteLine("There are {0} client connection(s).", e.Connections);
+      }
+
+      void Sensor_IsAvailableChanged(object sender, IsAvailableChangedEventArgs e)
+      {
+         if (e.IsAvailable)
+            Console.WriteLine("Kinect sensor is now available.");
+         else
+            Console.WriteLine("Kinect sensor is not available.");
       }
 
       void BodyFrameReader_FrameArrived(object sender, BodyFrameArrivedEventArgs e)
@@ -193,7 +214,7 @@ Please see examples in examples directory to understand better how this works.",
             frame.GetAndRefreshBodyData(Bodies);
          }
 
-         PackMotionData();
+         OnBodyData();
       }
 
       void BodyIndexFrameReader_FrameArrived(object sender, BodyIndexFrameArrivedEventArgs e)
@@ -203,16 +224,16 @@ Please see examples in examples directory to understand better how this works.",
             if (frame == null)
                return;
 
-            // Copy body index pixels to our memory. This itself won't update
-            // connected clients; instead we wait for parsed and analyzed
-            // body data to arrive from Kinect and update only then.
+            // Copy body index pixels to our memory.
             frame.CopyFrameDataToArray(BodyIndexPixels);
          }
+
+         OnBodyIndexData();
       }
 
-      byte[] ToJson<T>(T value)
+      byte[] ToBytes<T>(Message<T> message)
       {
-         return Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(value, SerializerSettings));
+         return Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(message, SerializerSettings));
       }
 
       public void Dispose()

@@ -16,7 +16,7 @@ namespace KinectMotion
 
       private IList<WebSocket> WebSockets { get; set; }
 
-      public const string Protocol = "KinectV2MotionV1";
+      public const string Protocol = "KinectMotionV1";
 
       public WebSocketServer(int port)
       {

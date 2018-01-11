@@ -29,6 +29,6 @@ namespace KinectMotion.Models
 
       public TrackingConfidence HandRightConfidence { get; set; }
 
-      public IReadOnlyDictionary<JointType, DepthSpacePoint> JointDepthSpacePositions { get; set; }
+      public IReadOnlyDictionary<JointType, DepthSpacePoint> JointScreenPositions { get; set; }
    }
 }

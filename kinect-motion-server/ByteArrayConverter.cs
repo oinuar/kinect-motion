@@ -1,24 +1,8 @@
-﻿using Microsoft.Kinect;
-using Newtonsoft.Json;
+﻿using Newtonsoft.Json;
 using System;
-using System.Collections.Generic;
 
-namespace KinectMotion.Models
+namespace KinectMotion
 {
-   struct MotionModel
-   {
-      public IEnumerable<BodyModel> Bodies { get; set; }
-
-      // Serialize this with custom converter to make sure that
-      // it is serialized as array, not string.
-      [JsonConverter(typeof(ByteArrayConverter))]
-      public byte[] BodyIndexPixels { get; set; }
-
-      public FrameDescription DepthFrame { get; set; }
-
-      public FrameDescription BodyIndexFrame { get; set; }
-   }
-
    class ByteArrayConverter : JsonConverter
    {
       public override bool CanConvert(Type objectType)
