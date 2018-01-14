@@ -82,7 +82,7 @@ class KinectMotionCaptureOperator(bpy.types.Operator):
 
    @classmethod
    def poll(cls, context):
-      return context.window_manager.kinect_motion.toggle_capture
+      return context.window_manager.kinect_motion.toggle_capture and context.object != None
 
    def modal(self, context, event):
 
@@ -91,18 +91,23 @@ class KinectMotionCaptureOperator(bpy.types.Operator):
          self.report({ "INFO" }, "Kinect Motion capture was stopped")
          return self.cancel(context)
 
-      # The timer event ticks every frame.
-      if event.type == "TIMER":
-         preferences = context.user_preferences.addons[__name__].preferences
-         mocap = context.scene.kinect_motion
+      try:
+         # Ensure that the connection is open.
+         self.client.ensure_connected()
 
-         try:
-            # Ensure that the connection is open.
-            self.client.ensure_connected()
+         # The timer event ticks every frame.
+         if event.type == "TIMER":
+            preferences = context.user_preferences.addons[__name__].preferences
+            mocap = context.scene.kinect_motion
 
             # Process data stream once per frame. This will block if there are no
-            # data ready.
-            self.client.once()
+            # data ready, but not longer than allowed timeout.
+            try:
+               self.client.once()
+
+            # We should drop a frame if once() is aborted.
+            except:
+               return { "PASS_THROUGH" }
 
             tracked_body = None
 
@@ -132,12 +137,12 @@ class KinectMotionCaptureOperator(bpy.types.Operator):
                   # Mocap this joint using a target armature and joint mapping function.
                   mocap_pose(position, orientation, mocap.armature, m(mocap), self.frame, preferences.auto_record_keyframes)
 
-         except:
+      except:
 
-            # Cancel the operator and re-raise the exception. We could improve showing nice errors to
-            # users but that's a different story.
-            self.cancel(context)
-            raise
+         # Cancel the operator and re-raise the exception. We could improve showing nice errors to
+         # users but that's a different story.
+         self.cancel(context)
+         raise
 
       return { "PASS_THROUGH" }
 
@@ -147,21 +152,29 @@ class KinectMotionCaptureOperator(bpy.types.Operator):
    def invoke(self, context, event):
       preferences = context.user_preferences.addons[__name__].preferences
 
-      self.start_mode = context.object.mode
-
-      # Switch to pose mode if not already set.
-      if self.start_mode != "POSE" and not "FINISHED" in bpy.ops.object.mode_set(mode = "POSE"):
-         return { "CANCELLED" }
-
       # Clear the state.
+      self.start_mode = context.object.mode
       self.timer = None
       self.frame = 0
 
-      # Create a client that is used to read the stream.
-      self.client = Client(preferences.endpoint)
+      # Switch to pose mode if not already set.
+      if self.start_mode != "POSE":
+         try:
+            if not "FINISHED" in bpy.ops.object.mode_set(mode = "POSE"):
+               raise RuntimeError("Cannot switch to pose mode")
+         except:
+            return self.cancel(context)
 
-      # Add a window timer which ticks for each rendering frame.
-      self.timer = context.window_manager.event_timer_add(1 / context.scene.render.fps, context.window)
+      # Select tick length based on render frame rate.
+      tick_length = 1 / context.scene.render.fps
+
+      # Create a client that is used to read the stream. Also, use tick length
+      # as a timeout value to make sure that we drop frames instead of wait them
+      # forever.
+      self.client = Client(preferences.endpoint, tick_length)
+
+      # Add a window timer which ticks for each tick length.
+      self.timer = context.window_manager.event_timer_add(tick_length, context.window)
 
       # Let window manager to handle this operation.
       context.window_manager.modal_handler_add(self)
@@ -185,7 +198,10 @@ class KinectMotionCaptureOperator(bpy.types.Operator):
 
       # Restore object mode back to initial state.
       if self.start_mode != "POSE":
-         bpy.ops.object.mode_set(mode = self.start_mode)
+         try:
+            bpy.ops.object.mode_set(mode = self.start_mode)
+         except:
+            pass
 
       self.start_mode = None
 

@@ -2,14 +2,18 @@ from json import loads
 from kinect_motion.ws4py.client import WebSocketBaseClient
 
 class Client(WebSocketBaseClient):
-   def __init__(self, url):
+   def __init__(self, url, timeout = None):
       WebSocketBaseClient.__init__(self, url, ["KinectMotionV1"])
+      self.__timeout = timeout
       self.__is_open = False
       self.__body_frame = None
 
    def ensure_connected(self):
       if not self.__is_open:
          self.connect()
+
+         # Set timeout once the connection is made.
+         self.sock.settimeout(self.__timeout)
 
    def bodies(self):
       if self.__body_frame == None:
