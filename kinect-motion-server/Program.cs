@@ -90,7 +90,8 @@ Welcome to KinectMotion server! Valid WebSocket endpoints are:
 
 The transportation protocol of WebSocket is {1}.
 
-Please see examples in examples directory to understand better how this works.", string.Join(Environment.NewLine, program.Server.Endpoints), WebSocketServer.Protocol);
+The server is running and accepting connections as long as this window is kept open. Please see examples in examples directory to understand better how this works.
+", string.Join(Environment.NewLine, program.Server.Endpoints), WebSocketServer.Protocol);
 
             // Stream the data as long as the application is running.
             program.Stream();

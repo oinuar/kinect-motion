@@ -31,9 +31,13 @@ def on_capture_changed(self, context):
    return None
 
 def mocap_pose(position, orientation, armature_name, target_name, frame, insert_keyframe):
+
+   # Manipulate armature pose bones.
    if armature_name in bpy.data.armatures and target_name in bpy.data.armatures[armature_name].pose.bones:
       bone = bpy.data.armatures[armature_name].pose.bones[target_name]
 
+      # Set location & orientation. Note that bone location in pose mode usually does not affect many of the bones,
+      # but this ensures that when affected, it is correct.
       bone.location = Vector((position["x"], position["y"], position["z"]))
       bone.rotation_quaternion = Quaternion((orientation["w"], orientation["x"], orientation["y"], orientation["z"]))
 
@@ -82,12 +86,12 @@ class KinectMotionCaptureOperator(bpy.types.Operator):
 
    def modal(self, context, event):
 
-      # Check cancellation condition.
-      if event.type == "ESC" or not context.window_manager.kinect_motion.toggle_capture:
+      # Cancel operation if ESC is pressed, capture is disabled or we are not in pose mode.
+      if event.type == "ESC" or not context.window_manager.kinect_motion.toggle_capture or context.object.mode != "POSE":
          self.report({ "INFO" }, "Kinect Motion capture was stopped")
          return self.cancel(context)
 
-      # The timer ticks every frame.
+      # The timer event ticks every frame.
       if event.type == "TIMER":
          preferences = context.user_preferences.addons[__name__].preferences
          mocap = context.scene.kinect_motion
@@ -98,10 +102,7 @@ class KinectMotionCaptureOperator(bpy.types.Operator):
 
             # Process data stream once per frame. This will block if there are no
             # data ready.
-            try:
-               self.client.once()
-            except:
-               return self.cancel(context)
+            self.client.once()
 
             tracked_body = None
 
@@ -128,6 +129,7 @@ class KinectMotionCaptureOperator(bpy.types.Operator):
                   position = tracked_body["joints"][joint]["position"]
                   orientation = tracked_body["jointOrientations"][joint]["orientation"]
 
+                  # Mocap this joint using a target armature and joint mapping function.
                   mocap_pose(position, orientation, mocap.armature, m(mocap), self.frame, preferences.auto_record_keyframes)
 
          except:
@@ -144,6 +146,12 @@ class KinectMotionCaptureOperator(bpy.types.Operator):
 
    def invoke(self, context, event):
       preferences = context.user_preferences.addons[__name__].preferences
+
+      self.start_mode = context.object.mode
+
+      # Switch to pose mode if not already set.
+      if self.start_mode != "POSE" and not "FINISHED" in bpy.ops.object.mode_set(mode = "POSE"):
+         return { "CANCELLED" }
 
       # Clear the state.
       self.timer = None
@@ -168,8 +176,18 @@ class KinectMotionCaptureOperator(bpy.types.Operator):
          self.timer = None
 
       if self.client != None:
-         self.client.terminate()
+         try:
+            self.client.terminate()
+         except:
+            pass
+
          self.client = None
+
+      # Restore object mode back to initial state.
+      if self.start_mode != "POSE":
+         bpy.ops.object.mode_set(mode = self.start_mode)
+
+      self.start_mode = None
 
       return { "CANCELLED" }
 
@@ -185,6 +203,7 @@ class KinectMotionStreamPanel(bpy.types.Panel):
 
       row = self.layout.row()
 
+      # Change button depending on if capture is toggled or not.
       if props.toggle_capture:
          row.prop(props, "toggle_capture", toggle = True, text = "Stop capture", icon = "ARMATURE_DATA")
       else:
@@ -258,7 +277,7 @@ class KinectMotionAddonPreferences(bpy.types.AddonPreferences):
 
    auto_record_keyframes = bpy.props.BoolProperty(
       name = "Auto record",
-      description = "Automatically records keyframes when body motion is detected",
+      description = "When enabled, automatically record keyframes when body motion is detected",
       default = False)
 
    def draw(self, context):
