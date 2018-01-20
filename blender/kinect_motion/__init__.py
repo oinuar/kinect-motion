@@ -30,11 +30,11 @@ def on_capture_changed(self, context):
 
    return None
 
-def mocap_pose(position, orientation, armature_name, target_name, frame, insert_keyframe):
+def mocap_pose(position, orientation, target_name, bone_name, frame, insert_keyframe):
 
    # Manipulate armature pose bones.
-   if armature_name in bpy.data.armatures and target_name in bpy.data.armatures[armature_name].pose.bones:
-      bone = bpy.data.armatures[armature_name].pose.bones[target_name]
+   if target_name in bpy.data.objects and bone_name in bpy.data.objects[target_name].pose.bones:
+      bone = bpy.data.objects[target_name].pose.bones[bone_name]
 
       # Set location & orientation. Note that bone location in pose mode usually does not affect many of the bones,
       # but this ensures that when affected, it is correct.
@@ -97,18 +97,16 @@ class KinectMotionCaptureOperator(bpy.types.Operator):
 
          # The timer event ticks every frame.
          if event.type == "TIMER":
-            preferences = context.user_preferences.addons[__name__].preferences
-            mocap = context.scene.kinect_motion
 
             # Process data stream once per frame. This will block if there are no
-            # data ready, but not longer than allowed timeout.
-            try:
-               self.client.once()
-
-            # We should drop a frame if once() is aborted.
-            except:
+            # data ready, but not longer than allowed timeout. If we could not get
+            # the data, just drop the frame.
+            if not self.client.once():
+               self.report({ "WARNING" }, "Kinect Motion capture frame was dropped")
                return { "PASS_THROUGH" }
 
+            preferences = context.user_preferences.addons[__name__].preferences
+            mocap = context.scene.kinect_motion
             tracked_body = None
 
             # Find a tracked body from the stream.
@@ -130,12 +128,12 @@ class KinectMotionCaptureOperator(bpy.types.Operator):
                self.frame += 1
 
                # Do live mocap of each body joint to their mapped counterparts.
-               for joint, m in __class__.joint_map:
+               for joint, m in self.joint_map.items():
                   position = tracked_body["joints"][joint]["position"]
                   orientation = tracked_body["jointOrientations"][joint]["orientation"]
 
                   # Mocap this joint using a target armature and joint mapping function.
-                  mocap_pose(position, orientation, mocap.armature, m(mocap), self.frame, preferences.auto_record_keyframes)
+                  mocap_pose(position, orientation, mocap.target, m(mocap), self.frame, preferences.auto_record_keyframes)
 
       except:
 
@@ -165,16 +163,13 @@ class KinectMotionCaptureOperator(bpy.types.Operator):
          except:
             return self.cancel(context)
 
-      # Select tick length based on render frame rate.
-      tick_length = 1 / context.scene.render.fps
-
-      # Create a client that is used to read the stream. Also, use tick length
+      # Create a client that is used to read the stream. Also, use frame length
       # as a timeout value to make sure that we drop frames instead of wait them
       # forever.
-      self.client = Client(preferences.endpoint, tick_length)
+      self.client = Client(preferences.endpoint, 1 / context.scene.render.fps)
 
-      # Add a window timer which ticks for each tick length.
-      self.timer = context.window_manager.event_timer_add(tick_length, context.window)
+      # Add a window timer which ticks twice for each frame.
+      self.timer = context.window_manager.event_timer_add(1 / (context.scene.render.fps * 2), context.window)
 
       # Let window manager to handle this operation.
       context.window_manager.modal_handler_add(self)
@@ -245,35 +240,35 @@ class KinectMotionBodyMocapPanel(bpy.types.Panel):
    def draw(self, context):
       props = context.scene.kinect_motion
 
-      self.__mocap_row(context).prop_search(props, "armature", bpy.data, "armatures")
+      self.__mocap_row(context).prop_search(props, "target", bpy.data, "objects")
 
       # Show bone selections only if armature selection is valid.
-      if props.armature in bpy.data.armatures:
-         self.__mocap_row(context).prop_search(props, "spine_base_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "spine_mid_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "neck_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "head_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "shoulder_left_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "elbow_left_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "wrist_left_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "hand_left_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "shoulder_right_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "elbow_right_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "wrist_right_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "hand_right_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "hip_left_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "knee_left", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "ankle_left_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "foot_left_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "hip_right_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "knee_right_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "ankle_right_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "foot_right_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "spine_shoulder_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "hand_tip_left_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "thumb_left_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "hand_tip_right_joint", bpy.data.armatures[props.armature], "bones")
-         self.__mocap_row(context).prop_search(props, "thumb_right_joint", bpy.data.armatures[props.armature], "bones")
+      if props.target in bpy.data.armatures:
+         self.__mocap_row(context).prop_search(props, "spine_base_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "spine_mid_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "neck_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "head_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "shoulder_left_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "elbow_left_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "wrist_left_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "hand_left_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "shoulder_right_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "elbow_right_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "wrist_right_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "hand_right_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "hip_left_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "knee_left", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "ankle_left_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "foot_left_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "hip_right_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "knee_right_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "ankle_right_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "foot_right_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "spine_shoulder_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "hand_tip_left_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "thumb_left_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "hand_tip_right_joint", bpy.data.armatures[props.target], "bones")
+         self.__mocap_row(context).prop_search(props, "thumb_right_joint", bpy.data.armatures[props.target], "bones")
 
    def __mocap_row(self, context):
       row = self.layout.row()
@@ -308,9 +303,9 @@ class KinectMotionWindowManagerPropertyGroup(bpy.types.PropertyGroup):
       update = on_capture_changed)
 
 class KinectMotionScenePropertyGroup(bpy.types.PropertyGroup):
-   armature = bpy.props.StringProperty(
-      name = "Armature",
-      description = "Armature whose bones are mapped")
+   target = bpy.props.StringProperty(
+      name = "Target",
+      description = "Target armature object whose bones are mapped")
 
    spine_base_joint = bpy.props.StringProperty(
       name = "Spine base joint",
@@ -349,7 +344,7 @@ class KinectMotionScenePropertyGroup(bpy.types.PropertyGroup):
       description = "Bone where shoulder right joint is mapped or empty if not mapped")
 
    elbow_right_joint = bpy.props.StringProperty(
-      name = "Spine base joint",
+      name = "Elbow right joint",
       description = "Bone where elbow right joint is mapped or empty if not mapped")
 
    wrist_right_joint = bpy.props.StringProperty(
