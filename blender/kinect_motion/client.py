@@ -1,4 +1,4 @@
-from json import loads
+from json import loads, dumps
 from ws4py.client import WebSocketBaseClient
 
 class Client(WebSocketBaseClient):
@@ -11,6 +11,9 @@ class Client(WebSocketBaseClient):
    def ensure_connected(self):
       if not self.__is_open:
          self.connect()
+
+         # Inform server that we are only interested in body frame data.
+         self.send(dumps({ "types": ["BodyFrameData"] }))
 
          # Set blockin on and timeout once the connection is made.
          self.sock.setblocking(True)

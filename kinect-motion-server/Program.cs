@@ -15,15 +15,17 @@ namespace KinectMotion
 {
    class Program : IDisposable
    {
+      const string WebSocketProtocol = "KinectMotionV1";
+
       KinectSensor Sensor { get; set; }
 
       BodyFrameReader BodyFrameReader { get; set; }
 
       BodyIndexFrameReader BodyIndexFrameReader { get; set; }
 
-      WebSocketServer Server { get; set; }
+      WebSocketServer<ClientState> Server { get; set; }
 
-      Queue<byte[]> Queue { get; set; }
+      Queue<KeyValuePair<string, ArraySegment<byte>>> Queue { get; set; }
 
       JsonSerializerSettings SerializerSettings { get; set; }
 
@@ -36,7 +38,7 @@ namespace KinectMotion
          Sensor = KinectSensor.GetDefault();
          BodyFrameReader = Sensor.BodyFrameSource.OpenReader();
          BodyIndexFrameReader = Sensor.BodyIndexFrameSource.OpenReader();
-         Queue = new Queue<byte[]>();
+         Queue = new Queue<KeyValuePair<string, ArraySegment<byte>>>();
          SerializerSettings = new JsonSerializerSettings
          {
             ContractResolver = new CamelCasePropertyNamesContractResolver(),
@@ -50,7 +52,7 @@ namespace KinectMotion
          };
 
          // Streaming server will listen 8521 port and use WebSockets.
-         Server = new WebSocketServer(8521);
+         Server = new WebSocketServer<ClientState>(8521, WebSocketProtocol);
 
          var bodyIndexFrameDescription = Sensor.BodyIndexFrameSource.FrameDescription;
 
@@ -91,7 +93,7 @@ Welcome to KinectMotion server! Valid WebSocket endpoints are:
 The transportation protocol of WebSocket is {1}.
 
 The server is running and accepting connections as long as this window is kept open. Please see examples in examples directory to understand better how this works.
-", string.Join(Environment.NewLine, program.Server.Endpoints), WebSocketServer.Protocol);
+", string.Join(Environment.NewLine, program.Server.Endpoints), WebSocketProtocol);
 
             // Stream the data as long as the application is running.
             program.Stream();
@@ -104,12 +106,17 @@ The server is running and accepting connections as long as this window is kept o
          {
 
             // Stream until the server is alive.
-            while (Server.KeepAlive())
+            while (Server.KeepAlive(OnClientStateUpdate))
             {
 
                // Apply frame updates in order they have arrived.
                while (Queue.Count > 0)
-                  Server.Send(Queue.Dequeue()).Wait();
+               {
+                  var item = Queue.Dequeue();
+
+                  // Send updates to clients that are interested in this frame.
+                  Server.SendAsync(item.Value, x => x.Types == null || x.Types.Contains(item.Key)).Wait();
+               }
 
                // Wait for queue changes.
                Monitor.Wait(Queue);
@@ -117,12 +124,17 @@ The server is running and accepting connections as long as this window is kept o
          }
       }
 
+      ClientState OnClientStateUpdate(ArraySegment<byte> segment, ClientState previousState)
+      {
+         return FromBytes<ClientState>(segment);
+      }
+
       void OnBodyData()
       {
          var description = Sensor.DepthFrameSource.FrameDescription;
          var cm = Sensor.CoordinateMapper;
 
-         OnMessage(new Message<BodyFrameData>
+         OnMessage(new ServerMessage<BodyFrameData>
          {
             Content = new BodyFrameData
             {
@@ -165,7 +177,7 @@ The server is running and accepting connections as long as this window is kept o
          var description = Sensor.BodyIndexFrameSource.FrameDescription;
          var cm = Sensor.CoordinateMapper;
 
-         OnMessage(new Message<BodyIndexFrameData>
+         OnMessage(new ServerMessage<BodyIndexFrameData>
          {
             Content = new BodyIndexFrameData
             {
@@ -175,19 +187,19 @@ The server is running and accepting connections as long as this window is kept o
          });
       }
 
-      void OnMessage<T>(Message<T> message)
+      void OnMessage<T>(ServerMessage<T> message)
       {
          var payload = ToBytes(message);
 
          // Put message to send queue and inform streaming thread that queue has changed.
          lock (Queue)
          {
-            Queue.Enqueue(payload);
+            Queue.Enqueue(new KeyValuePair<string, ArraySegment<byte>>(message.Type, payload));
             Monitor.Pulse(Queue);
          }
       }
 
-      void Server_ClientConnectionChanged(object sender, ClientConnectionChangedEventArgs e)
+      void Server_ClientConnectionChanged(object sender, ClientConnectionChangedEventArgs<ClientState> e)
       {
          Console.WriteLine("There are {0} client connection(s).", e.Connections);
       }
@@ -232,9 +244,16 @@ The server is running and accepting connections as long as this window is kept o
          OnBodyIndexData();
       }
 
-      byte[] ToBytes<T>(Message<T> message)
+      ArraySegment<byte> ToBytes<T>(ServerMessage<T> message)
       {
-         return Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(message, SerializerSettings));
+         var array = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(message, SerializerSettings));
+
+         return new ArraySegment<byte>(array, 0, array.Length);
+      }
+
+      T FromBytes<T>(ArraySegment<byte> segment)
+      {
+         return JsonConvert.DeserializeObject<T>(Encoding.UTF8.GetString(segment.Array, segment.Offset, segment.Count));
       }
 
       public void Dispose()

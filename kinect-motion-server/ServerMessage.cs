@@ -1,7 +1,7 @@
 ﻿
 namespace KinectMotion
 {
-   struct Message<T>
+   struct ServerMessage<T>
    {
       public string Type
       {

@@ -163,13 +163,15 @@ class KinectMotionCaptureOperator(bpy.types.Operator):
          except:
             return self.cancel(context)
 
+      frame_length = 1 / context.scene.render.fps
+
       # Create a client that is used to read the stream. Also, use frame length
       # as a timeout value to make sure that we drop frames instead of wait them
       # forever.
-      self.client = Client(preferences.endpoint, 1 / context.scene.render.fps)
+      self.client = Client(preferences.endpoint, frame_length)
 
-      # Add a window timer which ticks twice for each frame.
-      self.timer = context.window_manager.event_timer_add(1 / (context.scene.render.fps * 2), context.window)
+      # Add a window timer which ticks once per frame.
+      self.timer = context.window_manager.event_timer_add(frame_length, context.window)
 
       # Let window manager to handle this operation.
       context.window_manager.modal_handler_add(self)

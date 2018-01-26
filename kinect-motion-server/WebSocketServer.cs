@@ -8,20 +8,27 @@ using System.Threading.Tasks;
 
 namespace KinectMotion
 {
-   class WebSocketServer : IDisposable
+   class WebSocketServer<T> : IDisposable
    {
-      public event EventHandler<ClientConnectionChangedEventArgs> ClientConnectionChanged;
+      struct Client
+      {
+         public WebSocket ws;
+         public T data;
+      }
+
+      public event EventHandler<ClientConnectionChangedEventArgs<T>> ClientConnectionChanged;
+
+      public string Protocol { get; private set; }
 
       private HttpListener Listener { get; set; }
 
-      private IList<WebSocket> WebSockets { get; set; }
+      private IList<Client> Clients { get; set; }
 
-      public const string Protocol = "KinectMotionV1";
-
-      public WebSocketServer(int port)
+      public WebSocketServer(int port, string protocol)
       {
          Listener = new HttpListener();
-         WebSockets = new List<WebSocket>();
+         Clients = new List<Client>();
+         Protocol = protocol;
 
          // Bind only to one endpoint.
          Listener.Prefixes.Add(string.Format("http://localhost:{0}/", port));
@@ -42,51 +49,99 @@ namespace KinectMotion
          }
       }
 
-      public async Task Send(byte[] bytes)
+      public async Task SendAsync(ArraySegment<byte> bytes, Func<T, bool> predicate = null)
       {
          var tasks = new List<Task>();
-         var segment = new ArraySegment<byte>(bytes);
 
-         lock (WebSockets)
+         lock (Clients)
          {
 
-            // Send bytes to every client.
-            foreach (var webSocket in WebSockets)
-               tasks.Add(
-                  webSocket.SendAsync(segment, WebSocketMessageType.Binary, true, CancellationToken.None)
+            foreach (var client in Clients)
+            {
 
-                  // Ignore task result completely. This will allow some send requests
-                  // to throw an exception if for example the socket has died.
-                  .ContinueWith(_ => Task.FromResult<object>(null)));
+               // Send bytes to clients that match the predicate, or all if the predicate is null.
+               if (predicate == null || predicate(client.data))
+                  tasks.Add(
+                     client.ws.SendAsync(bytes, WebSocketMessageType.Binary, true, CancellationToken.None)
+
+                     // Ignore task result completely. This will allow some send requests
+                     // to throw an exception if for example the socket has died.
+                     .ContinueWith(_ => Task.FromResult<object>(null)));
+            }
          }
 
          await Task.WhenAll(tasks);
       }
 
-      public bool KeepAlive()
-      {
-         int oldConnections;
-         int newConnections;
+      private async Task<ArraySegment<byte>> ReceiveAsync(WebSocket ws, ArraySegment<byte> buffer, CancellationToken cancellationToken) {
 
-         lock (WebSockets)
+         // Read data from WebSocket to buffer.
+         var result = await ws.ReceiveAsync(buffer, cancellationToken);
+
+         // Stop when the message has been completely received and set array segment to delimite the
+         // full array.
+         if (result.EndOfMessage)
+            return new ArraySegment<byte>(buffer.Array);
+
+         var array = buffer.Array;
+         var oldLength = array.Length;
+
+         // Otherwise, resize the array buffer since message continues.
+         Array.Resize(ref array, oldLength * 2);
+
+         // Receive rest of the message to resized array. Note that we set offset equal to old array length.
+         return await ReceiveAsync(ws, new ArraySegment<byte>(array, oldLength, array.Length), cancellationToken);
+      }
+
+      public bool KeepAlive(Func<ArraySegment<byte>, T, T> handler = null)
+      {
+         int previousConnections;
+         var removedClients = new List<T>();
+         var tasks = new List<Task<Tuple<Client, ArraySegment<byte>>>>();
+
+         lock (Clients)
          {
-            oldConnections = WebSockets.Count;
+            previousConnections = Clients.Count;
 
             // Clean up all client connections.
-            for (int i = WebSockets.Count - 1; i >= 0; --i)
+            for (int i = Clients.Count - 1; i >= 0; --i)
             {
+               var client = Clients[i];
 
                // Remove a connection if its state is closed, closing or aborted.
-               if (WebSockets[i].State == WebSocketState.Aborted || WebSockets[i].State == WebSocketState.Closed || WebSockets[i].State == WebSocketState.CloseReceived)
-                  WebSockets.RemoveAt(i);
-            }
+               if (client.ws.State == WebSocketState.Aborted || client.ws.State == WebSocketState.Closed || client.ws.State == WebSocketState.CloseReceived)
+               {
+                  removedClients.Add(Clients[i].data);
+                  Clients.RemoveAt(i);
+                  continue;
+               }
 
-            newConnections = WebSockets.Count;
+               // Add task to receive client message.
+               tasks.Add(ReceiveAsync(client.ws, new ArraySegment<byte>(new byte[1024], 0, 1024), CancellationToken.None)
+                  .ContinueWith(x => x.IsCompleted && !x.IsCanceled && !x.IsFaulted
+                     ? Tuple.Create(client, x.Result)
+                     : Tuple.Create(client, new ArraySegment<byte>())));
+            }
          }
 
          // Emit client connection changed event if connection count has changed.
-         if (oldConnections != newConnections)
-            OnClientConnectionChanged(newConnections);
+         if (removedClients.Count > 0)
+            OnClientConnectionChanged(previousConnections - removedClients.Count, previousConnections, removedClients);
+
+         // Wait all client messages 0 millisecond to make sure that never blocks.
+         Task.WaitAll(tasks.ToArray(), 0);
+
+         if (handler != null)
+         {
+            foreach (var task in tasks)
+            {
+               var client = task.Result.Item1;
+
+               // Handle client messages for open connections that have content and update the state.
+               if (client.ws.State == WebSocketState.Open && task.Result.Item2.Count > 0)
+                   client.data = handler(task.Result.Item2, client.data);
+            }
+         }
 
          // Tell if the server is still listening.
          return Listener.IsListening;
@@ -96,9 +151,9 @@ namespace KinectMotion
       {
          var tasks = new List<Task>();
 
-         foreach (var webSocket in WebSockets)
+         foreach (var client in Clients)
             tasks.Add(
-               webSocket.CloseAsync(WebSocketCloseStatus.Empty, "Server is shutting down.", CancellationToken.None)
+               client.ws.CloseAsync(WebSocketCloseStatus.Empty, "Server is shutting down.", CancellationToken.None)
 
                // Ignore task result completely. This will allow some close requests
                // to throw an exception if for example the socket has died.
@@ -111,15 +166,16 @@ namespace KinectMotion
          Listener.Stop();
       }
 
-      private void OnClientConnectionChanged(int connections)
+      private void OnClientConnectionChanged(int currentConnections, int previousConnections, IEnumerable<T> clients)
       {
-         ClientConnectionChanged?.Invoke(this, new ClientConnectionChangedEventArgs(connections));
+         ClientConnectionChanged?.Invoke(this,
+            new ClientConnectionChangedEventArgs<T>(currentConnections, previousConnections, clients));
       }
 
-      private async static Task<WebSocket> HandleWebSocketContext(HttpListenerContext context)
+      private async static Task<WebSocket> HandleWebSocketContext(HttpListenerContext context, string protocol)
       {
          // Accept a WebSocket using a custom transfer protocol.
-         var webSocketContext = await context.AcceptWebSocketAsync(Protocol);
+         var webSocketContext = await context.AcceptWebSocketAsync(protocol);
 
          return webSocketContext.WebSocket;
       }
@@ -132,26 +188,28 @@ namespace KinectMotion
 
       private static void HandleGetContext(IAsyncResult result)
       {
-         var server = (WebSocketServer)result.AsyncState;
+         var server = (WebSocketServer<T>)result.AsyncState;
          var context = server.Listener.EndGetContext(result);
 
          try
          {
             if (context.Request.IsWebSocketRequest)
             {
-               var webSocket = HandleWebSocketContext(context).Result;
+               var webSocket = HandleWebSocketContext(context, server.Protocol).Result;
+               var client = new Client { ws = webSocket };
 
-               int connections;
+               int currentConnections, previousConnections;
 
                // Store all connected clients. These are cleaned up in KeepAlive
                // method.
-               lock (server.WebSockets)
+               lock (server.Clients)
                {
-                  server.WebSockets.Add(webSocket);
-                  connections = server.WebSockets.Count;
+                  previousConnections = server.Clients.Count;
+                  server.Clients.Add(client);
+                  currentConnections = server.Clients.Count;
                }
 
-               server.OnClientConnectionChanged(connections);
+               server.OnClientConnectionChanged(currentConnections, previousConnections, new T[] { client.data });
             }
             else
                HandleHttpRequest(context.Request, context.Response);
@@ -178,13 +236,23 @@ namespace KinectMotion
       }
    }
 
-   class ClientConnectionChangedEventArgs : EventArgs
+   class ClientConnectionChangedEventArgs<T> : EventArgs
    {
       public int Connections { get; private set; }
 
-      public ClientConnectionChangedEventArgs(int connections)
+      public int PreviousConnections { get; private set; }
+
+      public bool Connected { get { return Connections > PreviousConnections;  } }
+
+      public bool Disconnected { get { return Connections < PreviousConnections; } }
+
+      public IEnumerable<T> Clients { get; private set; }
+
+      public ClientConnectionChangedEventArgs(int currentConnections, int previousConnections, IEnumerable<T> clients)
       {
-         Connections = connections;
+         Connections = currentConnections;
+         PreviousConnections = previousConnections;
+         Clients = clients;
       }
    }
 }

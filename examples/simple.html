@@ -2,20 +2,23 @@
 <html>
 <head>
     <title>KinectMotion simple client example</title>
-    
+
     <style>
         #bodies {
             font-size: 26px;
         }
     </style>
-    
+
     <script>
         var socket = new WebSocket("ws://localhost:8521", "KinectMotionV1");
         
         socket.addEventListener("open", function() {
             console.log("KinectMotionV1 connection is now established.");
+
+            // Inform server that we are only interested in body frames.
+            socket.send(JSON.stringify({ types: ["BodyFrameData"] }));
         });
-        
+
         socket.addEventListener("message", function(event) {
             var reader = new FileReader();
             
@@ -25,7 +28,7 @@
                 // We are only interested in body data.
                 if (json.type !== "BodyFrameData")
                     return;
-                
+
                 json.content.bodies = json.content.bodies.filter(x => x.isTracked);
 
                 document.getElementById("bodies").innerHTML = 
@@ -34,7 +37,7 @@
                         : JSON.stringify(json.content.bodies, null, 3);
             });
             
-            reader.readAsText(event.data, "utf8");        
+            reader.readAsText(event.data, "utf8");
         });
     </script>
 </head>
